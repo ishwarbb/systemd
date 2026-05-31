@@ -83,17 +83,14 @@ static void close_fd_input(Uploader *u);
 
 #define easy_setopt(curl, opt, value, level, cmd)                       \
         do {                                                            \
-                code = curl_easy_setopt(curl, opt, value);              \
+                code = sym_curl_easy_setopt(curl, opt, value);          \
                 if (code) {                                             \
                         log_full(level,                                 \
                                  "curl_easy_setopt " #opt " failed: %s", \
-                                  curl_easy_strerror(code));            \
+                                  sym_curl_easy_strerror(code));        \
                         cmd;                                            \
                 }                                                       \
         } while (0)
-
-DEFINE_TRIVIAL_CLEANUP_FUNC_FULL(CURL*, curl_easy_cleanup, NULL);
-DEFINE_TRIVIAL_CLEANUP_FUNC_FULL(struct curl_slist*, curl_slist_free_all, NULL);
 
 static size_t output_callback(char *buf,
                               size_t size,
@@ -203,16 +200,16 @@ int start_upload(Uploader *u,
                 _cleanup_(curl_slist_free_allp) struct curl_slist *h = NULL;
                 struct curl_slist *l;
 
-                h = curl_slist_append(NULL, "Content-Type: application/vnd.fdo.journal");
+                h = sym_curl_slist_append(NULL, "Content-Type: application/vnd.fdo.journal");
                 if (!h)
                         return log_oom();
 
-                l = curl_slist_append(h, "Transfer-Encoding: chunked");
+                l = sym_curl_slist_append(h, "Transfer-Encoding: chunked");
                 if (!l)
                         return log_oom();
                 h = l;
 
-                l = curl_slist_append(h, "Accept: text/plain");
+                l = sym_curl_slist_append(h, "Accept: text/plain");
                 if (!l)
                         return log_oom();
                 h = l;
@@ -222,7 +219,7 @@ int start_upload(Uploader *u,
                         if (!header)
                                 return log_oom();
 
-                        l = curl_slist_append(h, header);
+                        l = sym_curl_slist_append(h, header);
                         if (!l)
                                 return log_oom();
                         h = l;
@@ -244,7 +241,7 @@ int start_upload(Uploader *u,
                         if (!header)
                                 return log_oom();
 
-                        l = curl_slist_append(h, header);
+                        l = sym_curl_slist_append(h, header);
                         if (!l)
                                 return log_oom();
                         h = l;
@@ -256,7 +253,7 @@ int start_upload(Uploader *u,
         if (!u->easy) {
                 _cleanup_(curl_easy_cleanupp) CURL *curl = NULL;
 
-                curl = curl_easy_init();
+                curl = sym_curl_easy_init();
                 if (!curl)
                         return log_error_errno(SYNTHETIC_ERRNO(ENOSR),
                                                "Call to curl_easy_init failed.");
@@ -327,11 +324,11 @@ int start_upload(Uploader *u,
         }
 
         /* upload to this place */
-        code = curl_easy_setopt(u->easy, CURLOPT_URL, u->url);
+        code = sym_curl_easy_setopt(u->easy, CURLOPT_URL, u->url);
         if (code)
                 return log_error_errno(SYNTHETIC_ERRNO(EXFULL),
                                        "curl_easy_setopt CURLOPT_URL failed: %s",
-                                       curl_easy_strerror(code));
+                                       sym_curl_easy_strerror(code));
 
         u->uploading = true;
 
@@ -458,6 +455,10 @@ static int setup_uploader(Uploader *u, const char *url, const char *state_file) 
                 .input = -1,
         };
 
+        r = dlopen_curl();
+        if (r < 0)
+                return r;
+
         if (arg_force_compression)
                 u->compression = ordered_hashmap_first(arg_compression);
 
@@ -501,8 +502,8 @@ static int setup_uploader(Uploader *u, const char *url, const char *state_file) 
 static void destroy_uploader(Uploader *u) {
         assert(u);
 
-        curl_easy_cleanup(u->easy);
-        curl_slist_free_all(u->header);
+        curl_easy_cleanupp(&u->easy);
+        curl_slist_free_allp(&u->header);
         free(u->answer);
 
         free(u->last_cursor);
@@ -543,7 +544,7 @@ static int update_content_encoding_header(Uploader *u, const CompressionConfig *
 
                 /* If Content-Encoding header is not found, append new one. */
                 if (!found) {
-                        struct curl_slist *l = curl_slist_append(u->header, header);
+                        struct curl_slist *l = sym_curl_slist_append(u->header, header);
                         if (!l)
                                 return log_oom();
                         u->header = l;
@@ -559,7 +560,7 @@ static int update_content_encoding_header(Uploader *u, const CompressionConfig *
                                 else
                                         u->header = TAKE_PTR(l->next);
 
-                                curl_slist_free_all(l);
+                                sym_curl_slist_free_all(l);
                                 update_header = true;
                                 break;
                         }
@@ -589,7 +590,7 @@ static int parse_accept_encoding_header(Uploader *u) {
                 return update_content_encoding_header(u, NULL);
 
         struct curl_header *header;
-        CURLHcode hcode = curl_easy_header(u->easy, "Accept-Encoding", 0, CURLH_HEADER, -1, &header);
+        CURLHcode hcode = sym_curl_easy_header(u->easy, "Accept-Encoding", 0, CURLH_HEADER, -1, &header);
         if (hcode != CURLHE_OK)
                 goto not_found;
 
@@ -638,22 +639,22 @@ static int perform_upload(Uploader *u) {
         assert(u);
 
         u->watchdog_timestamp = now(CLOCK_MONOTONIC);
-        code = curl_easy_perform(u->easy);
+        code = sym_curl_easy_perform(u->easy);
         if (code) {
                 if (u->error[0])
                         log_error("Upload to %s failed: %.*s",
                                   u->url, (int) sizeof(u->error), u->error);
                 else
                         log_error("Upload to %s failed: %s",
-                                  u->url, curl_easy_strerror(code));
+                                  u->url, sym_curl_easy_strerror(code));
                 return -EIO;
         }
 
-        code = curl_easy_getinfo(u->easy, CURLINFO_RESPONSE_CODE, &status);
+        code = sym_curl_easy_getinfo(u->easy, CURLINFO_RESPONSE_CODE, &status);
         if (code)
                 return log_error_errno(SYNTHETIC_ERRNO(EUCLEAN),
                                        "Failed to retrieve response code: %s",
-                                       curl_easy_strerror(code));
+                                       sym_curl_easy_strerror(code));
 
         if (status >= 300)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO),

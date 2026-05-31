@@ -11,6 +11,61 @@
 #include "time-util.h"
 #include "version.h"
 
+static void *curl_dl = NULL;
+
+DLSYM_PROTOTYPE(curl_easy_cleanup) = NULL;
+DLSYM_PROTOTYPE(curl_easy_getinfo) = NULL;
+#if LIBCURL_VERSION_NUM >= 0x075300 /* libcurl 7.83.0 */
+DLSYM_PROTOTYPE(curl_easy_header) = NULL;
+#endif
+DLSYM_PROTOTYPE(curl_easy_init) = NULL;
+DLSYM_PROTOTYPE(curl_easy_perform) = NULL;
+DLSYM_PROTOTYPE(curl_easy_setopt) = NULL;
+DLSYM_PROTOTYPE(curl_easy_strerror) = NULL;
+DLSYM_PROTOTYPE(curl_getdate) = NULL;
+DLSYM_PROTOTYPE(curl_multi_add_handle) = NULL;
+DLSYM_PROTOTYPE(curl_multi_assign) = NULL;
+DLSYM_PROTOTYPE(curl_multi_cleanup) = NULL;
+DLSYM_PROTOTYPE(curl_multi_info_read) = NULL;
+DLSYM_PROTOTYPE(curl_multi_init) = NULL;
+DLSYM_PROTOTYPE(curl_multi_remove_handle) = NULL;
+DLSYM_PROTOTYPE(curl_multi_setopt) = NULL;
+DLSYM_PROTOTYPE(curl_multi_socket_action) = NULL;
+DLSYM_PROTOTYPE(curl_slist_append) = NULL;
+DLSYM_PROTOTYPE(curl_slist_free_all) = NULL;
+
+int dlopen_curl(void) {
+        ELF_NOTE_DLOPEN("curl",
+                        "Support for HTTP(S) client operations",
+                        ELF_NOTE_DLOPEN_PRIORITY_SUGGESTED,
+                        "libcurl.so.4");
+
+        return dlopen_many_sym_or_warn(
+                        &curl_dl,
+                        "libcurl.so.4",
+                        LOG_DEBUG,
+                        DLSYM_ARG(curl_easy_cleanup),
+                        DLSYM_ARG(curl_easy_getinfo),
+#if LIBCURL_VERSION_NUM >= 0x075300
+                        DLSYM_ARG(curl_easy_header),
+#endif
+                        DLSYM_ARG(curl_easy_init),
+                        DLSYM_ARG(curl_easy_perform),
+                        DLSYM_ARG(curl_easy_setopt),
+                        DLSYM_ARG(curl_easy_strerror),
+                        DLSYM_ARG(curl_getdate),
+                        DLSYM_ARG(curl_multi_add_handle),
+                        DLSYM_ARG(curl_multi_assign),
+                        DLSYM_ARG(curl_multi_cleanup),
+                        DLSYM_ARG(curl_multi_info_read),
+                        DLSYM_ARG(curl_multi_init),
+                        DLSYM_ARG(curl_multi_remove_handle),
+                        DLSYM_ARG(curl_multi_setopt),
+                        DLSYM_ARG(curl_multi_socket_action),
+                        DLSYM_ARG(curl_slist_append),
+                        DLSYM_ARG(curl_slist_free_all));
+}
+
 static void curl_glue_check_finished(CurlGlue *g) {
         int r;
 
@@ -25,7 +80,7 @@ static void curl_glue_check_finished(CurlGlue *g) {
 
         CURLMsg *msg;
         int k = 0;
-        msg = curl_multi_info_read(g->curl, &k);
+        msg = sym_curl_multi_info_read(g->curl, &k);
         if (!msg)
                 return;
 
@@ -51,7 +106,7 @@ static int curl_glue_on_io(sd_event_source *s, int fd, uint32_t revents, void *u
         else
                 action = 0;
 
-        if (curl_multi_socket_action(g->curl, fd, action, &k) != CURLM_OK)
+        if (sym_curl_multi_socket_action(g->curl, fd, action, &k) != CURLM_OK)
                 return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Failed to propagate IO event.");
 
@@ -104,7 +159,7 @@ static int curl_glue_socket_callback(CURL *curl, curl_socket_t s, int action, vo
                 if (sd_event_add_io(g->event, &io, s, events, curl_glue_on_io, g) < 0)
                         return -1;
 
-                if (curl_multi_assign(g->curl, s, io) != CURLM_OK)
+                if (sym_curl_multi_assign(g->curl, s, io) != CURLM_OK)
                         return -1;
 
                 (void) sd_event_source_set_description(io, "curl-io");
@@ -126,7 +181,7 @@ static int curl_glue_on_timer(sd_event_source *s, uint64_t usec, void *userdata)
 
         assert(s);
 
-        if (curl_multi_socket_action(g->curl, CURL_SOCKET_TIMEOUT, 0, &k) != CURLM_OK)
+        if (sym_curl_multi_socket_action(g->curl, CURL_SOCKET_TIMEOUT, 0, &k) != CURLM_OK)
                 return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Failed to propagate timeout.");
 
@@ -188,7 +243,7 @@ CurlGlue *curl_glue_unref(CurlGlue *g) {
                 return NULL;
 
         if (g->curl)
-                curl_multi_cleanup(g->curl);
+                sym_curl_multi_cleanup(g->curl);
 
         while ((io = hashmap_steal_first(g->ios)))
                 sd_event_source_unref(io);
@@ -207,6 +262,10 @@ int curl_glue_new(CurlGlue **glue, sd_event *event) {
         _cleanup_(sd_event_unrefp) sd_event *e = NULL;
         int r;
 
+        r = dlopen_curl();
+        if (r < 0)
+                return r;
+
         if (event)
                 e = sd_event_ref(event);
         else {
@@ -215,7 +274,7 @@ int curl_glue_new(CurlGlue **glue, sd_event *event) {
                         return r;
         }
 
-        c = curl_multi_init();
+        c = sym_curl_multi_init();
         if (!c)
                 return -ENOMEM;
 
@@ -228,16 +287,16 @@ int curl_glue_new(CurlGlue **glue, sd_event *event) {
                 .curl = TAKE_PTR(c),
         };
 
-        if (curl_multi_setopt(g->curl, CURLMOPT_SOCKETDATA, g) != CURLM_OK)
+        if (sym_curl_multi_setopt(g->curl, CURLMOPT_SOCKETDATA, g) != CURLM_OK)
                 return -EINVAL;
 
-        if (curl_multi_setopt(g->curl, CURLMOPT_SOCKETFUNCTION, curl_glue_socket_callback) != CURLM_OK)
+        if (sym_curl_multi_setopt(g->curl, CURLMOPT_SOCKETFUNCTION, curl_glue_socket_callback) != CURLM_OK)
                 return -EINVAL;
 
-        if (curl_multi_setopt(g->curl, CURLMOPT_TIMERDATA, g) != CURLM_OK)
+        if (sym_curl_multi_setopt(g->curl, CURLMOPT_TIMERDATA, g) != CURLM_OK)
                 return -EINVAL;
 
-        if (curl_multi_setopt(g->curl, CURLMOPT_TIMERFUNCTION, curl_glue_timer_callback) != CURLM_OK)
+        if (sym_curl_multi_setopt(g->curl, CURLMOPT_TIMERFUNCTION, curl_glue_timer_callback) != CURLM_OK)
                 return -EINVAL;
 
         r = sd_event_add_defer(g->event, &g->defer, curl_glue_on_defer, g);
@@ -258,39 +317,39 @@ int curl_glue_make(CURL **ret, const char *url, void *userdata) {
         assert(ret);
         assert(url);
 
-        c = curl_easy_init();
+        c = sym_curl_easy_init();
         if (!c)
                 return -ENOMEM;
 
         if (DEBUG_LOGGING)
-                (void) curl_easy_setopt(c, CURLOPT_VERBOSE, 1L);
+                (void) sym_curl_easy_setopt(c, CURLOPT_VERBOSE, 1L);
 
-        if (curl_easy_setopt(c, CURLOPT_URL, url) != CURLE_OK)
+        if (sym_curl_easy_setopt(c, CURLOPT_URL, url) != CURLE_OK)
                 return -EIO;
 
-        if (curl_easy_setopt(c, CURLOPT_PRIVATE, userdata) != CURLE_OK)
+        if (sym_curl_easy_setopt(c, CURLOPT_PRIVATE, userdata) != CURLE_OK)
                 return -EIO;
 
         useragent = strjoina(program_invocation_short_name, "/" GIT_VERSION);
-        if (curl_easy_setopt(c, CURLOPT_USERAGENT, useragent) != CURLE_OK)
+        if (sym_curl_easy_setopt(c, CURLOPT_USERAGENT, useragent) != CURLE_OK)
                 return -EIO;
 
-        if (curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L) != CURLE_OK)
+        if (sym_curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L) != CURLE_OK)
                 return -EIO;
 
-        if (curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L) != CURLE_OK)
+        if (sym_curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L) != CURLE_OK)
                 return -EIO;
 
-        if (curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L) != CURLE_OK)
+        if (sym_curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L) != CURLE_OK)
                 return -EIO;
 
-        if (curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 30L) != CURLE_OK)
+        if (sym_curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 30L) != CURLE_OK)
                 return -EIO;
 
 #if LIBCURL_VERSION_NUM >= 0x075500 /* libcurl 7.85.0 */
-        if (curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, "HTTP,HTTPS,FILE") != CURLE_OK)
+        if (sym_curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, "HTTP,HTTPS,FILE") != CURLE_OK)
 #else
-        if (curl_easy_setopt(c, CURLOPT_PROTOCOLS, CURLPROTO_HTTP|CURLPROTO_HTTPS|CURLPROTO_FILE) != CURLE_OK)
+        if (sym_curl_easy_setopt(c, CURLOPT_PROTOCOLS, CURLPROTO_HTTP|CURLPROTO_HTTPS|CURLPROTO_FILE) != CURLE_OK)
 #endif
                 return -EIO;
 
@@ -302,7 +361,7 @@ int curl_glue_add(CurlGlue *g, CURL *c) {
         assert(g);
         assert(c);
 
-        if (curl_multi_add_handle(g->curl, c) != CURLM_OK)
+        if (sym_curl_multi_add_handle(g->curl, c) != CURLM_OK)
                 return -EIO;
 
         return 0;
@@ -315,9 +374,9 @@ void curl_glue_remove_and_free(CurlGlue *g, CURL *c) {
                 return;
 
         if (g->curl)
-                curl_multi_remove_handle(g->curl, c);
+                sym_curl_multi_remove_handle(g->curl, c);
 
-        curl_easy_cleanup(c);
+        sym_curl_easy_cleanup(c);
 }
 
 struct curl_slist *curl_slist_new(const char *first, ...) {
@@ -327,7 +386,7 @@ struct curl_slist *curl_slist_new(const char *first, ...) {
         if (!first)
                 return NULL;
 
-        l = curl_slist_append(NULL, first);
+        l = sym_curl_slist_append(NULL, first);
         if (!l)
                 return NULL;
 
@@ -341,10 +400,10 @@ struct curl_slist *curl_slist_new(const char *first, ...) {
                 if (!i)
                         break;
 
-                n = curl_slist_append(l, i);
+                n = sym_curl_slist_append(l, i);
                 if (!n) {
                         va_end(ap);
-                        curl_slist_free_all(l);
+                        sym_curl_slist_free_all(l);
                         return NULL;
                 }
 
@@ -390,7 +449,7 @@ int curl_parse_http_time(const char *t, usec_t *ret) {
         assert(t);
         assert(ret);
 
-        time_t v = curl_getdate(t, NULL);
+        time_t v = sym_curl_getdate(t, NULL);
         if (v == (time_t) -1)
                 return -EINVAL;
 

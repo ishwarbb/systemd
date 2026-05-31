@@ -270,6 +270,10 @@ if conf.get('HAVE_LIBBPF') == 1
         shared_sources += files('bpf-link.c')
 endif
 
+if conf.get('HAVE_LIBCURL') == 1
+        shared_sources += files('curl-util.c')
+endif
+
 if conf.get('HAVE_PAM') == 1
         shared_sources += files('pam-util.c')
 endif
@@ -384,6 +388,7 @@ libshared_deps = [threads,
                   libbpf_cflags,
                   libcrypt_cflags,
                   libcryptsetup_cflags,
+                  libcurl_cflags,
                   libdl,
                   libdw_cflags,
                   libelf_cflags,

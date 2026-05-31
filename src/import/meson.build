@@ -6,7 +6,7 @@ endif
 
 common_deps = [
         libbzip2,
-        libcurl,
+        libcurl_cflags,
         libxz,
         libz,
         libzstd,
@@ -32,7 +32,6 @@ executables += [
                 'name' : 'systemd-pull',
                 'public' : true,
                 'sources' : files(
-                        'curl-util.c',
                         'pull.c',
                         'pull-common.c',
                         'pull-job.c',
