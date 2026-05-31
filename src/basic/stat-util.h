@@ -23,13 +23,22 @@ int is_symlink(const char *path);
 
 int stat_verify_socket(const struct stat *st);
 int statx_verify_socket(const struct statx *stx);
+int fd_verify_socket(int fd);
 int is_socket(const char *path);
 
 int stat_verify_linked(const struct stat *st);
 int fd_verify_linked(int fd);
 
+int stat_verify_block(const struct stat *st);
+int fd_verify_block(int fd);
+
+int stat_verify_char(const struct stat *st);
+
 int stat_verify_device_node(const struct stat *st);
 int is_device_node(const char *path);
+
+int stat_verify_regular_or_block(const struct stat *st);
+int fd_verify_regular_or_block(int fd);
 
 int dir_is_empty_at(int dir_fd, const char *path, bool ignore_hidden_or_backup);
 static inline int dir_is_empty(const char *path, bool ignore_hidden_or_backup) {
@@ -122,9 +131,16 @@ int xstatfsat(int dir_fd, const char *path, struct statfs *ret);
 usec_t statx_timestamp_load(const struct statx_timestamp *ts) _pure_;
 nsec_t statx_timestamp_load_nsec(const struct statx_timestamp *ts) _pure_;
 
+/* This compares inode number, backing device and inode type, but not modification info */
 void inode_hash_func(const struct stat *q, struct siphash *state);
 int inode_compare_func(const struct stat *a, const struct stat *b);
 extern const struct hash_ops inode_hash_ops;
+
+/* This is a more thorough version of the above, and also checks the mtimes, the size, and the rdev. It does
+ * not check "external" attributes such as access mode or ownership. */
+void inode_unmodified_hash_func(const struct stat *q, struct siphash *state);
+int inode_unmodified_compare_func(const struct stat *a, const struct stat *b);
+extern const struct hash_ops inode_unmodified_hash_ops;
 
 DECLARE_STRING_TABLE_LOOKUP(inode_type, mode_t);
 
@@ -146,3 +162,5 @@ static inline bool inode_type_can_hardlink(mode_t m) {
          * type). */
         return IN_SET(m & S_IFMT, S_IFSOCK, S_IFLNK, S_IFREG, S_IFBLK, S_IFCHR, S_IFIFO);
 }
+
+int vfs_free_bytes(int fd, uint64_t *ret);

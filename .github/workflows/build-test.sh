@@ -12,7 +12,7 @@ success() { echo >&2 -e "\033[32;1m$1\033[0m"; }
 ARGS=(
     "--optimization=0 -Dopenssl=disabled -Dtpm=true -Dtpm2=enabled"
     "--optimization=s -Dutmp=false -Dc_args='-DOPENSSL_NO_UI_CONSOLE=1'"
-    "--optimization=2 -Dc_args=-Wmaybe-uninitialized -Ddns-over-tls=openssl"
+    "--optimization=2 -Ddns-over-tls=openssl"
     "--optimization=3 -Db_lto=true -Ddns-over-tls=false"
     "--optimization=3 -Db_lto=false -Dtpm2=disabled -Dlibfido2=disabled -Dp11kit=disabled -Defi=false -Dbootloader=disabled"
     "--optimization=3 -Dfexecve=true -Dstandalone-binaries=true -Dstatic-libsystemd=true -Dstatic-libudev=true"
@@ -65,6 +65,7 @@ PACKAGES=(
     util-linux
     zstd
 )
+FEATURES=()
 COMPILER="${COMPILER:?}"
 COMPILER_VERSION="${COMPILER_VERSION:?}"
 LINKER="${LINKER:?}"
@@ -108,6 +109,11 @@ elif [[ "$COMPILER" == gcc ]]; then
     CFLAGS=""
     CXXFLAGS=""
 
+    # -Wmaybe-uninitialized works badly in old gcc versions
+    if [[ "$COMPILER_VERSION" -lt 14 ]]; then
+        CFLAGS="$CFLAGS -Wno-maybe-uninitialized"
+    fi
+
     if ! apt-get -y install --dry-run "gcc-$COMPILER_VERSION" >/dev/null; then
         # Latest gcc stack deb packages provided by
         # https://launchpad.net/~ubuntu-toolchain-r/+archive/ubuntu/test
@@ -128,6 +134,8 @@ sudo rm -f /etc/apt/sources.list.d/microsoft-prod.{list,sources}
 if grep -q 'VERSION_CODENAME=jammy' /usr/lib/os-release; then
     sudo add-apt-repository -y --no-update ppa:upstream-systemd-ci/systemd-ci
     sudo add-apt-repository -y --no-update --enable-source
+    # Jammy's kernel is too old and there's no vmlinux.h
+    FEATURES+=("-Dbpf-framework=disabled")
 else
     # add-apt-repository --enable-source does not work on deb822 style sources.
     for f in /etc/apt/sources.list.d/*.sources; do
@@ -151,8 +159,8 @@ if [ -n "$bpftool_dir" ]; then
 fi
 
 if [[ -n "$CUSTOM_PYTHON" ]]; then
-    # If CUSTOM_PYTHON is set we need to pull jinja2 from pip, as a local interpreter is used
-    pip3 install --user --break-system-packages jinja2
+    # If CUSTOM_PYTHON is set we need to pull dependencies from pip, as a local interpreter is used
+    pip3 install --user --break-system-packages jinja2 pefile
 fi
 
 $CC --version
@@ -162,11 +170,6 @@ ninja --version
 for args in "${ARGS[@]}"; do
     SECONDS=0
 
-    if [[ "$COMPILER" == clang && "$args" =~ Wmaybe-uninitialized ]]; then
-        # -Wmaybe-uninitialized is not implemented in clang
-        continue
-    fi
-
     info "Checking build with $args"
     # shellcheck disable=SC2086
     if ! AR="$AR" \
@@ -175,6 +178,7 @@ for args in "${ARGS[@]}"; do
          meson setup \
                -Dtests=unsafe -Dslow-tests=true -Dfuzz-tests=true --werror \
                -Dnobody-group=nogroup -Ddebug=false \
+               "${FEATURES[@]}" \
                $args build; then
 
         cat build/meson-logs/meson-log.txt

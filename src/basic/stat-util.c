@@ -32,7 +32,7 @@ static int verify_stat_at(
         struct stat st;
         int r;
 
-        assert(fd >= 0 || IN_SET(fd, AT_FDCWD, XAT_FDROOT));
+        assert(wildcard_fd_is_valid(fd));
         assert(!isempty(path) || !follow);
         assert(verify_func);
 
@@ -145,6 +145,9 @@ int stat_verify_symlink(const struct stat *st) {
 }
 
 int fd_verify_symlink(int fd) {
+        if (IN_SET(fd, AT_FDCWD, XAT_FDROOT))
+                return -EISDIR;
+
         return verify_stat_at(fd, /* path= */ NULL, /* follow= */ false, stat_verify_symlink, /* verify= */ true);
 }
 
@@ -153,12 +156,12 @@ int is_symlink(const char *path) {
         return verify_stat_at(AT_FDCWD, path, false, stat_verify_symlink, false);
 }
 
-static mode_t mode_verify_socket(mode_t mode) {
-        if (S_ISLNK(mode))
-                return -ELOOP;
-
+static int mode_verify_socket(mode_t mode) {
         if (S_ISDIR(mode))
                 return -EISDIR;
+
+        if (S_ISLNK(mode))
+                return -ELOOP;
 
         if (!S_ISSOCK(mode))
                 return -ENOTSOCK;
@@ -176,6 +179,13 @@ int statx_verify_socket(const struct statx *stx) {
         assert(stx);
 
         return mode_verify_socket(stx->stx_mode);
+}
+
+int fd_verify_socket(int fd) {
+        if (IN_SET(fd, AT_FDCWD, XAT_FDROOT))
+                return -EISDIR;
+
+        return verify_stat_at(fd, /* path= */ NULL, /* follow= */ false, stat_verify_socket, /* verify= */ true);
 }
 
 int is_socket(const char *path) {
@@ -200,14 +210,51 @@ int fd_verify_linked(int fd) {
         return verify_stat_at(fd, NULL, false, stat_verify_linked, true);
 }
 
-int stat_verify_device_node(const struct stat *st) {
+int stat_verify_block(const struct stat *st) {
         assert(st);
+
+        if (S_ISDIR(st->st_mode))
+                return -EISDIR;
 
         if (S_ISLNK(st->st_mode))
                 return -ELOOP;
 
+        if (!S_ISBLK(st->st_mode))
+                return -ENOTBLK;
+
+        return 0;
+}
+
+int fd_verify_block(int fd) {
+        if (IN_SET(fd, AT_FDCWD, XAT_FDROOT))
+                return -EISDIR;
+
+        return verify_stat_at(fd, /* path= */ NULL, /* follow= */ false, stat_verify_block, /* verify= */ true);
+}
+
+int stat_verify_char(const struct stat *st) {
+        assert(st);
+
         if (S_ISDIR(st->st_mode))
                 return -EISDIR;
+
+        if (S_ISLNK(st->st_mode))
+                return -ELOOP;
+
+        if (!S_ISCHR(st->st_mode))
+                return -EBADFD;
+
+        return 0;
+}
+
+int stat_verify_device_node(const struct stat *st) {
+        assert(st);
+
+        if (S_ISDIR(st->st_mode))
+                return -EISDIR;
+
+        if (S_ISLNK(st->st_mode))
+                return -ELOOP;
 
         if (!S_ISBLK(st->st_mode) && !S_ISCHR(st->st_mode))
                 return -ENOTTY;
@@ -218,6 +265,28 @@ int stat_verify_device_node(const struct stat *st) {
 int is_device_node(const char *path) {
         assert(!isempty(path));
         return verify_stat_at(AT_FDCWD, path, false, stat_verify_device_node, false);
+}
+
+int stat_verify_regular_or_block(const struct stat *st) {
+        assert(st);
+
+        if (S_ISDIR(st->st_mode))
+                return -EISDIR;
+
+        if (S_ISLNK(st->st_mode))
+                return -ELOOP;
+
+        if (!S_ISREG(st->st_mode) && !S_ISBLK(st->st_mode))
+                return -EBADFD;
+
+        return 0;
+}
+
+int fd_verify_regular_or_block(int fd) {
+        if (IN_SET(fd, AT_FDCWD, XAT_FDROOT))
+                return -EISDIR;
+
+        return verify_stat_at(fd, /* path= */ NULL, /* follow= */ false, stat_verify_regular_or_block, /* verify= */ true);
 }
 
 int dir_is_empty_at(int dir_fd, const char *path, bool ignore_hidden_or_backup) {
@@ -349,7 +418,7 @@ int xstatx_full(int fd,
          *    STATX_MNT_ID if not.
          */
 
-        assert(fd >= 0 || IN_SET(fd, AT_FDCWD, XAT_FDROOT));
+        assert(wildcard_fd_is_valid(fd));
         assert((mandatory_mask & optional_mask) == 0);
         assert(!FLAGS_SET(xstatx_flags, XSTATX_MNT_ID_BEST) || !((mandatory_mask|optional_mask) & (STATX_MNT_ID|STATX_MNT_ID_UNIQUE)));
         assert(ret);
@@ -411,7 +480,7 @@ static int xfstatfs(int fd, struct statfs *ret) {
 int xstatfsat(int dir_fd, const char *path, struct statfs *ret) {
         _cleanup_close_ int fd = -EBADF;
 
-        assert(dir_fd >= 0 || IN_SET(dir_fd, AT_FDCWD, XAT_FDROOT));
+        assert(wildcard_fd_is_valid(dir_fd));
         assert(ret);
 
         if (!isempty(path)) {
@@ -516,15 +585,17 @@ int inode_same_at(int fda, const char *filea, int fdb, const char *fileb, int fl
 
                         goto fallback;
                 }
-                if (r == 0)
+                bool have_unique_mntid = r > 0;
+
+                if (!have_unique_mntid)
                         mntida = _mntida;
 
                 r = name_to_handle_at_try_fid(
                                 fdb,
                                 fileb,
                                 &hb,
-                                r > 0 ? NULL : &_mntidb, /* if we managed to get unique mnt id for a, insist on that for b */
-                                r > 0 ? &mntidb : NULL,
+                                have_unique_mntid ? NULL : &_mntidb, /* if we managed to get unique mnt id for a, insist on that for b */
+                                have_unique_mntid ? &mntidb : NULL,
                                 ntha_flags);
                 if (r < 0) {
                         if (is_name_to_handle_at_fatal_error(r))
@@ -532,8 +603,10 @@ int inode_same_at(int fda, const char *filea, int fdb, const char *fileb, int fl
 
                         goto fallback;
                 }
-                if (r == 0)
+                if (r == 0) {
+                        assert(!have_unique_mntid); /* _mntidb was initialized by name_to_handle_at_try_fid() */
                         mntidb = _mntidb;
+                }
 
                 /* Now compare the two file handles */
                 if (!file_handle_equal(ha, hb))
@@ -709,6 +782,10 @@ nsec_t statx_timestamp_load_nsec(const struct statx_timestamp *ts) {
 void inode_hash_func(const struct stat *q, struct siphash *state) {
         siphash24_compress_typesafe(q->st_dev, state);
         siphash24_compress_typesafe(q->st_ino, state);
+
+        /* Also include inode type, to mirror stat_inode_same() */
+        mode_t type = q->st_mode & S_IFMT;
+        siphash24_compress_typesafe(type, state);
 }
 
 int inode_compare_func(const struct stat *a, const struct stat *b) {
@@ -718,10 +795,67 @@ int inode_compare_func(const struct stat *a, const struct stat *b) {
         if (r != 0)
                 return r;
 
-        return CMP(a->st_ino, b->st_ino);
+        r = CMP(a->st_ino, b->st_ino);
+        if (r != 0)
+                return r;
+
+        return CMP(a->st_mode & S_IFMT, b->st_mode & S_IFMT);
 }
 
 DEFINE_HASH_OPS_WITH_KEY_DESTRUCTOR(inode_hash_ops, struct stat, inode_hash_func, inode_compare_func, free);
+
+void inode_unmodified_hash_func(const struct stat *q, struct siphash *state) {
+        inode_hash_func(q, state);
+
+        siphash24_compress_typesafe(q->st_mtim.tv_sec, state);
+        siphash24_compress_typesafe(q->st_mtim.tv_nsec, state);
+
+        if (S_ISREG(q->st_mode))
+                siphash24_compress_typesafe(q->st_size, state);
+        else {
+                uint64_t invalid = UINT64_MAX;
+                siphash24_compress_typesafe(invalid, state);
+        }
+
+        if (S_ISCHR(q->st_mode) || S_ISBLK(q->st_mode))
+                siphash24_compress_typesafe(q->st_rdev, state);
+        else {
+                dev_t invalid = (dev_t) -1;
+                siphash24_compress_typesafe(invalid, state);
+        }
+}
+
+int inode_unmodified_compare_func(const struct stat *a, const struct stat *b) {
+        int r;
+
+        r = inode_compare_func(a, b);
+        if (r != 0)
+                return r;
+
+        r = CMP(a->st_mtim.tv_sec, b->st_mtim.tv_sec);
+        if (r != 0)
+                return r;
+
+        r = CMP(a->st_mtim.tv_nsec, b->st_mtim.tv_nsec);
+        if (r != 0)
+                return r;
+
+        if (S_ISREG(a->st_mode)) {
+                r = CMP(a->st_size, b->st_size);
+                if (r != 0)
+                        return r;
+        }
+
+        if (S_ISCHR(a->st_mode) || S_ISBLK(a->st_mode)) {
+                r = CMP(a->st_rdev, b->st_rdev);
+                if (r != 0)
+                        return r;
+        }
+
+        return 0;
+}
+
+DEFINE_HASH_OPS_WITH_KEY_DESTRUCTOR(inode_unmodified_hash_ops, struct stat, inode_unmodified_hash_func, inode_unmodified_compare_func, free);
 
 const char* inode_type_to_string(mode_t m) {
 
@@ -770,4 +904,21 @@ mode_t inode_type_from_string(const char *s) {
                 return S_IFSOCK;
 
         return MODE_INVALID;
+}
+
+int vfs_free_bytes(int fd, uint64_t *ret) {
+        assert(fd >= 0);
+        assert(ret);
+
+        /* Safely returns the current available disk space (for root, i.e. including any space reserved for
+         * root) of the disk referenced by the fd, converted to bytes. */
+
+        struct statvfs sv;
+        if (fstatvfs(fd, &sv) < 0)
+                return -errno;
+
+        if (!MUL_SAFE(ret, (uint64_t) sv.f_frsize, (uint64_t) sv.f_bfree))
+                return -ERANGE;
+
+        return 0;
 }

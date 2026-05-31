@@ -25,9 +25,9 @@ systemd-dissect "$MINIMAL_IMAGE.raw" | grep -F -f <(sed 's/"//g' "$OS_RELEASE") 
 
 systemd-dissect --list "$MINIMAL_IMAGE.raw" | grep '^etc/os-release$' >/dev/null
 systemd-dissect --mtree "$MINIMAL_IMAGE.raw" --mtree-hash yes | \
-    grep -E "^.(/usr|)/bin/cat type=file mode=0755 uid=0 gid=0 size=[0-9]* sha256sum=[a-z0-9]*$" >/dev/null
+    grep -E "^.(/usr|)/bin/bash type=file mode=0755 uid=0 gid=0 size=[0-9]* sha256sum=[a-z0-9]*$" >/dev/null
 systemd-dissect --mtree "$MINIMAL_IMAGE.raw" --mtree-hash no  | \
-    grep -E "^.(/usr|)/bin/cat type=file mode=0755 uid=0 gid=0 size=[0-9]*$" >/dev/null
+    grep -E "^.(/usr|)/bin/bash type=file mode=0755 uid=0 gid=0 size=[0-9]*$" >/dev/null
 
 read -r SHA256SUM1 _ < <(systemd-dissect --copy-from "$MINIMAL_IMAGE.raw" etc/os-release | sha256sum)
 test "$SHA256SUM1" != ""
@@ -160,6 +160,8 @@ mv "$MINIMAL_IMAGE.foohash" "$MINIMAL_IMAGE.roothash"
 # Derive partition UUIDs from root hash, in UUID syntax
 ROOT_UUID="$(systemd-id128 -u show "$(head -c 32 "$MINIMAL_IMAGE.roothash")" -u | tail -n 1 | cut -b 6-)"
 VERITY_UUID="$(systemd-id128 -u show "$(tail -c 32 "$MINIMAL_IMAGE.roothash")" -u | tail -n 1 | cut -b 6-)"
+USR_UUID="$ROOT_UUID"
+USR_VERITY_UUID="$VERITY_UUID"
 
 systemd-dissect --json=short \
                 --root-hash "$MINIMAL_IMAGE_ROOTHASH" \
@@ -177,6 +179,20 @@ if [[ -n "${OPENSSL_CONFIG:-}" ]]; then
 fi
 systemd-dissect --root-hash "$MINIMAL_IMAGE_ROOTHASH" "$MINIMAL_IMAGE.gpt" | grep -F "MARKER=1" >/dev/null
 systemd-dissect --root-hash "$MINIMAL_IMAGE_ROOTHASH" "$MINIMAL_IMAGE.gpt" | grep -F -f <(sed 's/"//g' "$OS_RELEASE") >/dev/null
+systemd-dissect --json=short \
+                --usr-hash "$MINIMAL_IMAGE_ROOTHASH" \
+                "$MINIMAL_IMAGE.usr.gpt" | \
+                grep '{"rw":"ro","designator":"usr","partition_uuid":"'"$USR_UUID"'","partition_label":"Usr Partition","fstype":"squashfs","architecture":"'"$ARCHITECTURE"'","verity":"signed",' >/dev/null
+systemd-dissect --json=short \
+                --usr-hash "$MINIMAL_IMAGE_ROOTHASH" \
+                "$MINIMAL_IMAGE.usr.gpt" | \
+                grep '{"rw":"ro","designator":"usr-verity","partition_uuid":"'"$USR_VERITY_UUID"'","partition_label":"Usr Verity Partition","fstype":"DM_verity_hash","architecture":"'"$ARCHITECTURE"'","verity":null,' >/dev/null
+if [[ -n "${OPENSSL_CONFIG:-}" ]]; then
+    systemd-dissect --json=short \
+                    --usr-hash "$MINIMAL_IMAGE_ROOTHASH" \
+                    "$MINIMAL_IMAGE.usr.gpt" | \
+                    grep -E '{"rw":"ro","designator":"usr-verity-sig","partition_uuid":"'".*"'","partition_label":"Usr Signature Partition","fstype":"verity_hash_signature","architecture":"'"$ARCHITECTURE"'","verity":null,' >/dev/null
+fi
 
 # Test image policies
 systemd-dissect --validate "$MINIMAL_IMAGE.gpt"
@@ -194,6 +210,12 @@ systemd-dissect --validate "$MINIMAL_IMAGE.gpt" --image-policy=root=verity:swap=
 systemd-dissect --validate "$MINIMAL_IMAGE.gpt" --image-policy=root=signed
 (! systemd-dissect --validate "$MINIMAL_IMAGE.gpt" --image-policy=root=signed:root-verity-sig=unused+absent)
 (! systemd-dissect --validate "$MINIMAL_IMAGE.gpt" --image-policy=root=signed:root-verity=unused+absent)
+systemd-dissect --validate "$MINIMAL_IMAGE.usr.gpt" --image-policy=usr=verity
+systemd-dissect --validate "$MINIMAL_IMAGE.usr.gpt" --image-policy=usr=verity:usr-verity-sig=unused+absent
+(! systemd-dissect --validate "$MINIMAL_IMAGE.usr.gpt" --image-policy=usr=verity:usr-verity=unused+absent)
+systemd-dissect --validate "$MINIMAL_IMAGE.usr.gpt" --image-policy=usr=signed
+(! systemd-dissect --validate "$MINIMAL_IMAGE.usr.gpt" --image-policy=usr=signed:usr-verity-sig=unused+absent)
+(! systemd-dissect --validate "$MINIMAL_IMAGE.usr.gpt" --image-policy=usr=signed:usr-verity=unused+absent)
 
 # Test RootImagePolicy= unit file setting
 systemd-run --wait -P \
@@ -1180,6 +1202,47 @@ systemd-sysext merge
 systemd-sysext unmerge
 systemctl status foo.service 2>&1 | grep -v -F "Warning" >/dev/null
 rm /var/lib/extensions/app-reload.raw
+
+# Test that GPT images with an ISO9660 El Torito boot catalog are dissected correctly. The blkid
+# superblock filter must prevent the iso9660 superblock from being detected, so dissection proceeds via
+# the GPT partition table rather than treating the whole image as a single iso9660 filesystem.
+defs="$(mktemp --directory "$IMAGE_DIR/test-50-dissect-eltorito.defs.XXXXXXXXXX")"
+imgs="$(mktemp --directory "$IMAGE_DIR/test-50-dissect-eltorito.imgs.XXXXXXXXXX")"
+
+tee "$defs/00-esp.conf" <<EOF
+[Partition]
+Type=esp
+Format=vfat
+SizeMinBytes=100M
+SizeMaxBytes=100M
+EOF
+
+tee "$defs/10-root.conf" <<EOF
+[Partition]
+Type=root
+Format=ext4
+SizeMinBytes=100M
+SizeMaxBytes=100M
+EOF
+
+systemd-repart --pretty=yes \
+               --definitions="$defs" \
+               --empty=create \
+               --size=auto \
+               --dry-run=no \
+               --offline=yes \
+               --el-torito=yes \
+               "$imgs/eltorito.img"
+
+# Verify the image has both iso9660 superblock and GPT partition table
+blkid -o value -s PTTYPE "$imgs/eltorito.img" | grep -x gpt
+blkid -o value -s TYPE "$imgs/eltorito.img" | grep -x iso9660
+
+# systemd-dissect must process the GPT partitions, not the whole-device iso9660 superblock
+systemd-dissect --json=short "$imgs/eltorito.img" | grep -F '"designator":"root"' | grep -F '"fstype":"ext4"'
+systemd-dissect --json=short "$imgs/eltorito.img" | grep -F '"designator":"esp"' | grep -F '"fstype":"vfat"'
+
+rm -rf "$defs" "$imgs"
 
 # Sneak in a couple of expected-to-fail invocations to cover
 # https://github.com/systemd/systemd/issues/29610

@@ -124,6 +124,21 @@ if want_tests != 'false'
              exe,
              suite : 'udev',
              args : ['verify', '--resolve-names=late', all_rules])
+
+        link_abi_targets = [libsystemd, libudev, libshared, libcore]
+        link_abi_targets += module_targets
+        foreach _, exe : executables_by_name
+                link_abi_targets += exe
+        endforeach
+
+        if conf.get('BUILD_MODE_DEVELOPER') == 1
+                test('test-link-abi',
+                     files('test-link-abi.py'),
+                     args : link_abi_targets,
+                     depends : link_abi_targets,
+                     suite : 'dist',
+                     timeout : 120)
+        endif
 endif
 
 ############################################################
@@ -357,6 +372,7 @@ if install_tests
                 'integration-tests/TEST-63-PATH/TEST-63-PATH.units',
                 'integration-tests/TEST-65-ANALYZE/TEST-65-ANALYZE.units',
                 'integration-tests/TEST-66-DEVICE-ISOLATION/TEST-66-DEVICE-ISOLATION.units',
+                'integration-tests/TEST-74-AUX-UTILS/TEST-74-AUX-UTILS.units',
                 'integration-tests/TEST-80-NOTIFYACCESS/TEST-80-NOTIFYACCESS.units',
                 'units',
         ]

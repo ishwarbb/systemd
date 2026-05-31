@@ -1773,6 +1773,15 @@ StateDirectory=aaa/bbb ccc</programlisting>
         <literal>tmpfs</literal>, then for system services the directories specified in
         <varname>RuntimeDirectory=</varname> are removed when the system is rebooted.</para>
 
+        <para>If <varname>DynamicUser=</varname> is used together with
+        <varname>RuntimeDirectoryPreserve=</varname> set to values other than <option>no</option>, the logic
+        is slightly altered: the <varname>RuntimeDirectory=</varname> directories are created below
+        <filename>/run/private/</filename>, which is a host directory made inaccessible to unprivileged
+        users, which ensures that access to these directories cannot be gained through dynamic user ID
+        recycling. Symbolic links are created to hide this difference in behaviour. Both from the
+        perspective of the host and from inside the unit, the relevant directories hence always appear
+        directly below <filename>/run/</filename>.</para>
+
         <xi:include href="version-info.xml" xpointer="v235"/></listitem>
       </varlistentry>
 
@@ -3285,6 +3294,10 @@ SystemCallErrorNumber=EPERM</programlisting>
         If the empty string is assigned to this option, the list of files to read is reset, all prior assignments
         have no effect.</para>
 
+        <para>Note that shell variables such as <literal>$HOME</literal> are not expanded in this path.
+        Use <literal>%</literal>-specifiers instead; for example, <literal>%h</literal> expands to the
+        user's home directory.</para>
+
         <para>The files listed with this directive will be read shortly before the process is executed (more
         specifically, after all processes from a previous unit state terminated. This means you can generate these
         files in one unit state, and read it with this option in the next. The files are read from the file
@@ -4689,11 +4702,35 @@ StandardInputData=V2XigLJyZSBubyBzdHJhbmdlcnMgdG8gbG92ZQpZb3Uga25vdyB0aGUgcnVsZX
           <term><varname>$MEMORY_PRESSURE_WRITE</varname></term>
 
           <listitem><para>If memory pressure monitoring is enabled for this service unit, the path to watch
-          and the data to write into it. See <ulink url="https://systemd.io/MEMORY_PRESSURE">Memory Pressure
+          and the data to write into it. See <ulink url="https://systemd.io/PRESSURE">Resource Pressure
           Handling</ulink> for details about these variables and the service protocol data they
           convey.</para>
 
           <xi:include href="version-info.xml" xpointer="v254"/></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term><varname>$CPU_PRESSURE_WATCH</varname></term>
+          <term><varname>$CPU_PRESSURE_WRITE</varname></term>
+
+          <listitem><para>If CPU pressure monitoring is enabled for this service unit, the path to watch
+          and the data to write into it. See <ulink url="https://systemd.io/PRESSURE">Resource Pressure
+          Handling</ulink> for details about these variables and the service protocol data they
+          convey.</para>
+
+          <xi:include href="version-info.xml" xpointer="v261"/></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term><varname>$IO_PRESSURE_WATCH</varname></term>
+          <term><varname>$IO_PRESSURE_WRITE</varname></term>
+
+          <listitem><para>If IO pressure monitoring is enabled for this service unit, the path to watch
+          and the data to write into it. See <ulink url="https://systemd.io/PRESSURE">Resource Pressure
+          Handling</ulink> for details about these variables and the service protocol data they
+          convey.</para>
+
+          <xi:include href="version-info.xml" xpointer="v261"/></listitem>
         </varlistentry>
 
         <varlistentry>

@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <unistd.h>
+
 #include "sd-event.h"
 #include "sd-json.h"
 #include "sd-varlink.h"
@@ -19,7 +21,7 @@
 #include "install-file.h"
 #include "io-util.h"
 #include "json-util.h"
-#include "mkdir-label.h"
+#include "mkdir.h"
 #include "oci-util.h"
 #include "ordered-set.h"
 #include "path-util.h"
@@ -29,6 +31,7 @@
 #include "pull-oci.h"
 #include "rm-rf.h"
 #include "set.h"
+#include "sha256.h"
 #include "signal-util.h"
 #include "stat-util.h"
 #include "string-util.h"
@@ -192,15 +195,12 @@ int oci_pull_new(
                 .userns_fd = -EBADF,
         };
 
-        i->glue->on_finished = pull_job_curl_on_finished;
-        i->glue->userdata = i;
-
         *ret = TAKE_PTR(i);
 
         return 0;
 }
 
-static int pull_job_payload_as_json(PullJob *j, sd_json_variant **ret) {
+static int pull_job_payload_as_json_object(PullJob *j, sd_json_variant **ret) {
         int r;
 
         assert(j);
@@ -214,7 +214,7 @@ static int pull_job_payload_as_json(PullJob *j, sd_json_variant **ret) {
 
         _cleanup_(sd_json_variant_unrefp) sd_json_variant *v = NULL;
         unsigned line = 0, column = 0;
-        r = sd_json_parse((char*) j->payload.iov_base, /* flags= */ 0, &v, &line, &column);
+        r = sd_json_parse((char*) j->payload.iov_base, SD_JSON_PARSE_MUST_BE_OBJECT, &v, &line, &column);
         if (r < 0)
                 return log_error_errno(r, "Failed to parse JSON at position %u:%u: %m", line, column);
 
@@ -391,7 +391,7 @@ static int oci_pull_process_index(OciPull *i, PullJob *j) {
          * https://github.com/opencontainers/image-spec/blob/main/image-index.md */
 
         _cleanup_(sd_json_variant_unrefp) sd_json_variant *v = NULL;
-        r = pull_job_payload_as_json(j, &v);
+        r = pull_job_payload_as_json_object(j, &v);
         if (r < 0)
                 return r;
 
@@ -783,7 +783,7 @@ static int oci_pull_process_manifest(OciPull *i, PullJob *j) {
          * https://github.com/opencontainers/image-spec/blob/main/manifest.md */
 
         _cleanup_(sd_json_variant_unrefp) sd_json_variant *v = NULL;
-        r = pull_job_payload_as_json(j, &v);
+        r = pull_job_payload_as_json_object(j, &v);
         if (r < 0)
                 return r;
 
@@ -958,7 +958,7 @@ static int oci_pull_save_nspawn_settings(OciPull *i) {
 
         _cleanup_(sd_json_variant_unrefp) sd_json_variant *v = NULL;
         unsigned line = 0, column = 0;
-        r = sd_json_parse((char*) i->config.iov_base, /* flags= */ 0, &v, &line, &column);
+        r = sd_json_parse((char*) i->config.iov_base, SD_JSON_PARSE_MUST_BE_OBJECT, &v, &line, &column);
         if (r < 0)
                 return log_error_errno(r, "Failed to parse JSON config data at position %u:%u: %m", line, column);
 
@@ -1193,7 +1193,7 @@ static int oci_pull_make_local(OciPull *i) {
                 return r;
 
         if (!iovec_is_set(&i->config) ||
-            iovec_memcmp(&i->config, &IOVEC_MAKE_STRING("{}")) == 0)
+            iovec_equal(&i->config, &IOVEC_MAKE_STRING("{}")))
                 log_info("Image has no configuration, not saving.");
         else {
                 r = oci_pull_save_nspawn_settings(i);
@@ -1340,7 +1340,7 @@ static void oci_pull_job_on_finished_bearer_token(PullJob *j) {
                 goto finish;
         }
 
-        r = pull_job_payload_as_json(j, &v);
+        r = pull_job_payload_as_json_object(j, &v);
         if (r < 0)
                 goto finish;
 
